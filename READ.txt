@@ -1,0 +1,19 @@
+winVpwn - Stage 1
+
+Run Linux ELF binaries on Windows without WSL, a VM, or Docker.
+
+A compatibility layer that makes the core of pwntools usable natively on
+Windows: loads Linux ELF binaries into an in-process CPU emulator (Unicorn
+Engine) and exposes a virtual kernel with virtual processes, file
+descriptors, and a virtual filesystem.
+
+Stage 1 scope
+- ELF loader for static ET_EXEC x86_64 images (PT_LOAD mapping, overlap validation)
+- Unicorn execution loop with syscall interception and register context handling
+- Syscall dispatch for write / exit / exit_group with errno semantics and trace recording
+- PyO3 bindings exposing run_elf and parse_elf (winvpwn._core)
+- CLI commands: doctor, run, elf, asm, disasm, version
+- 30 Rust unit tests, 17 Python unit/CLI tests
+- CI workflows, mkdocs documentation, CHANGELOG, MIT LICENSE
+
+See README.md for the full project overview.

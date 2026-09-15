@@ -1,0 +1,25 @@
+name: docs
+
+on:
+  push:
+    branches: [main, "ai/*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mkdocs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install mkdocs
+        run: pip install mkdocs mkdocs-material
+      - name: Build docs
+        run: mkdocs build --strict

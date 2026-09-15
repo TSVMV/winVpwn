@@ -1,0 +1,26 @@
+site_name: winVpwn
+site_description: Run Linux ELF binaries on Windows without WSL, VMs or Docker
+repo_url: https://github.com/OWNER/winVpwn
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+  palette:
+    scheme: slate
+    primary: teal
+    accent: amber
+
+nav:
+  - Home: index.md
+  - Architecture: architecture.md
+  - Compatibility: compatibility.md
+  - Security: security.md
+  - Contributing: contributing.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.superfences
+  - pymdownx.tabbed
+  - pymdownx.highlight
