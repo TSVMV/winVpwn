@@ -26,7 +26,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang libclang-dev
       - name: Install Python linters
-        run: pip install ruff mypy
+        run: |
+          pip install ruff mypy
+          pip install -e .
       - name: rustfmt
         run: cargo fmt --all -- --check
       - name: clippy (warnings denied)

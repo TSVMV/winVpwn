@@ -41,7 +41,6 @@ jobs:
       - name: Install Python package
         run: |
           pip install maturin pytest hypothesis ruff mypy
-          maturin develop --release
           pip install -e .
       - name: Python tests
         run: pytest
