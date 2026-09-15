@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Run Linux ELF binaries on Windows without WSL, VMs or Docker: a pwntools compatibility layer."
 readme = "README.md"
 license = { text = "MIT" }
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [{ name = "winVpwn contributors" }]
 keywords = ["pwn", "ctf", "elf", "unicorn", "pwntools"]
 classifiers = [
@@ -19,9 +19,9 @@ classifiers = [
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Programming Language :: Rust",
     "Topic :: Software Development :: Build Tools",
     "Topic :: System :: Emulators",
@@ -48,7 +48,7 @@ strip = true
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 src = ["src", "tests"]
 
 [tool.ruff.lint]
@@ -59,7 +59,7 @@ ignore = ["E501", "B008"]
 "tests/**" = ["B008"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 strict = true
 warn_unused_configs = true
 exclude = ["build/", "dist/"]

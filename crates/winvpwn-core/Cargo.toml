@@ -20,4 +20,5 @@ goblin.workspace = true
 default = ["python"]
 # Compiles the PyO3 bindings. maturin builds with this feature enabled;
 # `cargo test --no-default-features` runs the core logic without linking Python.
-python = ["dep:pyo3", "pyo3/extension-module"]
+# abi3-py311 produces a single stable-ABI wheel usable by CPython 3.11 and newer.
+python = ["dep:pyo3", "pyo3/extension-module", "pyo3/abi3-py311"]
