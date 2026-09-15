@@ -27,7 +27,7 @@ jobs:
           sudo apt-get install -y clang libclang-dev
       - name: Install Python linters
         run: |
-          pip install ruff mypy
+          pip install ruff mypy pytest
           pip install -e .
       - name: rustfmt
         run: cargo fmt --all -- --check
