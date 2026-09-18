@@ -43,6 +43,17 @@ def doctor(
 def run(
     elf: Path = typer.Argument(..., help="Path to a static ET_EXEC x86_64 ELF."),
     timeout: float = typer.Option(0.0, "--timeout", help="Execution timeout in milliseconds."),
+    stdin_file: Path | None = typer.Option(
+        None, "--stdin", help="Feed this file to guest stdin (fd 0)."
+    ),
+    map_file: list[str] = typer.Option(
+        [],
+        "--map",
+        help="Map a host file into the guest VFS as guest=host or guest=host:rw.",
+    ),
+    arg: list[str] = typer.Option([], "--arg", help="Guest argv entry (repeatable)."),
+    env: list[str] = typer.Option([], "--env", help="Guest env entry KEY=VAL (repeatable)."),
+    cwd: str = typer.Option("/", "--cwd", help="Guest working directory."),
     json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
     no_color: bool = typer.Option(False, "--no-color", help="Disable ANSI colors."),
     quiet: bool = typer.Option(False, "--quiet", help="Suppress non-essential output."),
@@ -51,7 +62,18 @@ def run(
     console = _make_console(no_color=no_color)
     try:
         image = elf.read_bytes()
-        result = core.run_elf(image, int(timeout))
+        stdin_bytes = stdin_file.read_bytes() if stdin_file is not None else None
+        argv = arg if arg else [str(elf)]
+        maps = [_parse_map(item) for item in map_file]
+        result = core.run_elf(
+            image,
+            int(timeout),
+            stdin_bytes,
+            argv,
+            env,
+            maps,
+            cwd,
+        )
     except (ValueError, OSError) as exc:
         console.print(f"[{ERROR}]error[/] {exc}")
         raise typer.Exit(code=2) from exc
@@ -74,6 +96,27 @@ def run(
         _print_run_summary(console, result)
         _print_trace(console, result.get("trace", []))
     raise typer.Exit(code=_exit_code(result))
+
+
+def _parse_map(spec: str) -> tuple[str, str, bool]:
+    """Parse `guest=host` or `guest=host:rw`."""
+    if "=" not in spec:
+        raise ValueError(f"invalid --map {spec!r}: expected guest=host")
+    guest, rest = spec.split("=", 1)
+    writable = False
+    host = rest
+    if rest.endswith(":rw"):
+        writable = True
+        host = rest[: -len(":rw")]
+    elif rest.endswith(":ro"):
+        host = rest[: -len(":ro")]
+    guest = guest.strip()
+    host = host.strip()
+    if not guest.startswith("/"):
+        guest = "/" + guest
+    if not guest or not host:
+        raise ValueError(f"invalid --map {spec!r}")
+    return guest, host, writable
 
 
 def _exit_code(result: dict[str, object]) -> int:

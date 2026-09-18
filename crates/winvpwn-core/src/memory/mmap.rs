@@ -76,6 +76,17 @@ impl MemoryMap {
     pub fn regions(&self) -> &[Region] {
         &self.regions
     }
+
+    /// Remove regions that start at `base` (best-effort munmap bookkeeping).
+    pub fn remove(&mut self, base: u64, size: u64) {
+        self.regions
+            .retain(|r| !(r.base == base && r.size == size) && !r.overlaps(base, size));
+    }
+
+    /// Highest mapped address, or 0 when empty.
+    pub fn high_water(&self) -> u64 {
+        self.regions.iter().map(|r| r.end()).max().unwrap_or(0)
+    }
 }
 
 #[cfg(test)]

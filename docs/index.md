@@ -2,19 +2,19 @@
 
 Run Linux ELF binaries on Windows without WSL, a VM, or Docker.
 
-winVpwn is a compatibility layer that makes the core of pwntools usable natively
-on Windows. It loads Linux ELF binaries into an in-process CPU emulator (Unicorn
-Engine), translates Linux system calls to Windows APIs, and exposes a virtual
+winVpwn is a compatibility layer that loads Linux ELF binaries into an in-process
+CPU emulator (Unicorn Engine) and translates Linux system calls into a virtual
 kernel with virtual processes, file descriptors, and a virtual filesystem.
 
 ## Status
 
-Stage 1 — infrastructure and the minimal executable path (in development).
+0.2.0 — virtual kernel for static `ET_EXEC` x86_64.
 
 - ELF loader for static `ET_EXEC` x86_64 binaries
 - Unicorn execution loop with `syscall` interception
-- `write`, `exit`, `exit_group` syscalls
-- `winvpwn run` and `winvpwn elf`
+- Virtual FD table, in-memory VFS, explicit host maps
+- I/O, brk/mmap, and libc bootstrap syscalls
+- `winvpwn run` / `elf` / `asm` / `disasm` / `doctor`
 
 ## Quick start
 
@@ -23,6 +23,7 @@ $ pip install winvpwn
 $ winvpwn doctor
 $ winvpwn run hello_static
 hello, winVpwn
+$ winvpwn run pwn --stdin input.bin --map /flag=./flag.txt
 ```
 
 ## Documentation

@@ -18,8 +18,8 @@ use unicorn_engine::Unicorn;
 use crate::elf::LoadedElf;
 use crate::memory::mmap::{MemoryMap, MmapError};
 use crate::syscall::dispatch::{Dispatch, SyscallOutcome, SyscallRegs};
+use crate::vkernel::kernel::KernelState;
 use crate::vkernel::mem::UnicornGuest;
-use crate::vkernel::process::ProcessState;
 use crate::vkernel::{Context, ExitReason};
 
 /// Page size of the x86-64 guest.
@@ -94,7 +94,7 @@ pub type VcpuResult<T> = Result<T, VcpuError>;
 
 /// Mutable state shared between the emulator callbacks and the owner.
 struct SharedState {
-    output: Vec<u8>,
+    kernel: KernelState,
     exit_reason: Option<ExitReason>,
     engine_error: Option<String>,
 }
@@ -102,7 +102,7 @@ struct SharedState {
 impl SharedState {
     fn new() -> Self {
         Self {
-            output: Vec::new(),
+            kernel: KernelState::new(),
             exit_reason: None,
             engine_error: None,
         }
@@ -121,15 +121,22 @@ pub struct Vcpu {
 impl Vcpu {
     /// Create an engine with `dispatch` installed as the syscall handler.
     pub fn new(dispatch: Arc<Dispatch>) -> VcpuResult<Self> {
+        Self::new_with_kernel(dispatch, KernelState::new())
+    }
+
+    /// Create an engine with a prepared kernel (stdin, VFS maps, cwd).
+    pub fn new_with_kernel(dispatch: Arc<Dispatch>, kernel: KernelState) -> VcpuResult<Self> {
         let uc: Unicorn<'static, ()> = Unicorn::new(
             unicorn_engine::unicorn_const::Arch::X86,
             unicorn_engine::unicorn_const::Mode::MODE_64,
         )
         .map_err(|e| VcpuError::Init(e.to_string()))?;
 
+        let mut shared = SharedState::new();
+        shared.kernel = kernel;
         let mut vcpu = Vcpu {
             uc: Some(uc),
-            shared: Rc::new(RefCell::new(SharedState::new())),
+            shared: Rc::new(RefCell::new(shared)),
             map: MemoryMap::new(),
             regions: Vec::new(),
         };
@@ -153,16 +160,24 @@ impl Vcpu {
             let rip = uc.reg_read(RegisterX86::RIP).unwrap_or(0);
 
             let regs = SyscallRegs::from_regs(rax, [rdi, rsi, rdx, r10, r8, r9], rip);
+            let kernel = {
+                let mut s = shared.borrow_mut();
+                std::mem::replace(&mut s.kernel, KernelState::new())
+            };
             let outcome = {
                 let mut ctx = Context {
-                    process: ProcessState::Running,
                     mem: Box::new(UnicornGuest::new(uc)),
-                    io: Default::default(),
+                    kernel,
                 };
                 let outcome = dispatch.dispatch(&mut ctx, regs);
-                let combined = ctx.io.combined();
-                if !combined.is_empty() {
-                    shared.borrow_mut().output.extend_from_slice(&combined);
+                {
+                    let mut s = shared.borrow_mut();
+                    s.kernel = ctx.kernel;
+                    match &outcome {
+                        Ok(SyscallOutcome::Exit(reason)) => s.exit_reason = Some(reason.clone()),
+                        Err(e) => s.engine_error = Some(e.to_string()),
+                        _ => {}
+                    }
                 }
                 outcome
             };
@@ -171,12 +186,10 @@ impl Vcpu {
                 Ok(SyscallOutcome::Return { ret }) => {
                     let _ = uc.reg_write(RegisterX86::RAX, ret as u64);
                 }
-                Ok(SyscallOutcome::Exit(reason)) => {
-                    shared.borrow_mut().exit_reason = Some(reason);
+                Ok(SyscallOutcome::Exit(_)) => {
                     let _ = uc.emu_stop();
                 }
-                Err(e) => {
-                    shared.borrow_mut().engine_error = Some(e.to_string());
+                Err(_) => {
                     let _ = uc.emu_stop();
                 }
             }
@@ -219,6 +232,16 @@ impl Vcpu {
                 })?;
             self.regions.push((start, size, seg.flags));
         }
+        let high = image
+            .segments
+            .iter()
+            .map(|s| s.vaddr + s.memsz)
+            .max()
+            .unwrap_or(0);
+        let brk = (high + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        let mut k = self.shared.borrow_mut();
+        k.kernel.brk_base = brk;
+        k.kernel.brk = brk;
         Ok(())
     }
 
@@ -266,6 +289,82 @@ impl Vcpu {
         uc.mem_write(argc_addr, &layout)
             .map_err(|e| VcpuError::RegOp(e.to_string()))?;
         uc.reg_write(RegisterX86::RSP, argc_addr)
+            .map_err(|e| VcpuError::RegOp(e.to_string()))?;
+        uc.reg_write(RegisterX86::RIP, entry)
+            .map_err(|e| VcpuError::RegOp(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Build a Linux-style argv/envp/auxv stack and point RSP at it.
+    pub fn setup_linux_stack(
+        &mut self,
+        entry: u64,
+        stack_top: u64,
+        argv: &[String],
+        envp: &[String],
+    ) -> VcpuResult<()> {
+        let mut strings: Vec<Vec<u8>> = Vec::new();
+        for s in argv.iter().chain(envp.iter()) {
+            let mut b = s.as_bytes().to_vec();
+            b.push(0);
+            strings.push(b);
+        }
+        let str_bytes: usize = strings.iter().map(|s| s.len()).sum();
+        let random_sz = 16usize;
+        // argc + argv pointers + NULL + env pointers + NULL + 7 auxv pairs + AT_NULL
+        let ptr_count = 1 + argv.len() + 1 + envp.len() + 1 + 8 * 2;
+        let ptr_bytes = ptr_count * 8;
+        let mut total = ptr_bytes + str_bytes + random_sz + 16;
+        total = (total + 0xf) & !0xf;
+        let rsp = stack_top - total as u64;
+        let mut cursor = stack_top;
+        cursor -= random_sz as u64;
+        let random_addr = cursor;
+        let mut rand = [0u8; 16];
+        {
+            let mut k = self.shared.borrow_mut();
+            for chunk in rand.chunks_mut(8) {
+                chunk.copy_from_slice(&k.kernel.next_rand().to_le_bytes()[..chunk.len()]);
+            }
+        }
+        self.write_guest(random_addr, &rand)?;
+        let mut str_addrs = Vec::new();
+        for s in &strings {
+            cursor -= s.len() as u64;
+            self.write_guest(cursor, s)?;
+            str_addrs.push(cursor);
+        }
+        let mut table = Vec::with_capacity(ptr_bytes);
+        table.extend_from_slice(&(argv.len() as u64).to_le_bytes());
+        for i in 0..argv.len() {
+            table.extend_from_slice(&str_addrs[i].to_le_bytes());
+        }
+        table.extend_from_slice(&0u64.to_le_bytes());
+        for i in 0..envp.len() {
+            table.extend_from_slice(&str_addrs[argv.len() + i].to_le_bytes());
+        }
+        table.extend_from_slice(&0u64.to_le_bytes());
+        let (uid, gid) = {
+            let k = self.shared.borrow();
+            (k.kernel.uid as u64, k.kernel.gid as u64)
+        };
+        let aux = [
+            (6u64, 0x1000u64),
+            (9, entry),
+            (11, uid),
+            (12, uid),
+            (13, gid),
+            (14, gid),
+            (25, random_addr),
+            (0, 0),
+        ];
+        for (t, v) in aux {
+            table.extend_from_slice(&t.to_le_bytes());
+            table.extend_from_slice(&v.to_le_bytes());
+        }
+        self.write_guest(rsp, &table)?;
+        let uc = self.uc.as_mut().expect("engine present");
+        uc.reg_write(RegisterX86::RSP, rsp)
             .map_err(|e| VcpuError::RegOp(e.to_string()))?;
         uc.reg_write(RegisterX86::RIP, entry)
             .map_err(|e| VcpuError::RegOp(e.to_string()))?;
@@ -333,7 +432,12 @@ impl Vcpu {
 
     /// The captured combined stdout+stderr so far.
     pub fn output(&self) -> Vec<u8> {
-        self.shared.borrow().output.clone()
+        self.shared.borrow().kernel.io.combined()
+    }
+
+    /// Snapshot of kernel state after a run (VFS dirty files, cwd, brk).
+    pub fn kernel(&self) -> KernelState {
+        self.shared.borrow().kernel.clone()
     }
 
     /// The exit reason observed during the last [`Vcpu::run`], if any.

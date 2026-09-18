@@ -37,8 +37,14 @@ pub trait GuestMemory {
     fn read(&self, addr: u64, len: usize) -> Result<Vec<u8>, GuestMemError>;
     /// Write `data` to `addr`.
     fn write(&mut self, addr: u64, data: &[u8]) -> Result<(), GuestMemError>;
-    /// Map `len` anonymous bytes at `base` with permission `prot`.
+    /// Map `len` anonymous bytes at `base` with Linux `PROT_*` bits.
     fn map_anon(&mut self, base: u64, len: usize, prot: u32) -> Result<(), GuestMemError>;
+    /// Unmap `len` bytes at `base`.
+    fn unmap(&mut self, base: u64, len: usize) -> Result<(), GuestMemError>;
+    /// Change Linux `PROT_*` bits on an existing mapping.
+    fn protect(&mut self, base: u64, len: usize, prot: u32) -> Result<(), GuestMemError>;
+    /// Set the thread-local FS base (`arch_prctl` ARCH_SET_FS).
+    fn set_fs_base(&mut self, base: u64) -> Result<(), GuestMemError>;
 }
 
 /// In-memory backend: a flat byte map, no emulator involved.
@@ -83,7 +89,7 @@ impl InMemGuest {
 impl GuestMemory for InMemGuest {
     fn map_anon(&mut self, base: u64, len: usize, _prot: u32) -> Result<(), GuestMemError> {
         if self.bytes.contains_key(&base) {
-            return Err(GuestMemError { addr: base, len });
+            return Ok(());
         }
         self.bytes.insert(base, vec![0u8; len]);
         Ok(())
@@ -135,6 +141,19 @@ impl GuestMemory for InMemGuest {
         }
         Ok(())
     }
+
+    fn unmap(&mut self, base: u64, _len: usize) -> Result<(), GuestMemError> {
+        self.bytes.remove(&base);
+        Ok(())
+    }
+
+    fn protect(&mut self, _base: u64, _len: usize, _prot: u32) -> Result<(), GuestMemError> {
+        Ok(())
+    }
+
+    fn set_fs_base(&mut self, _base: u64) -> Result<(), GuestMemError> {
+        Ok(())
+    }
 }
 
 /// Unicorn-backed backend: reads reflect the emulator's live guest memory.
@@ -169,10 +188,62 @@ impl GuestMemory for UnicornGuest<'_, '_> {
             .map_err(|e| map_uc_error(e, addr, data.len()))
     }
 
-    fn map_anon(&mut self, _base: u64, _len: usize, _prot: u32) -> Result<(), GuestMemError> {
-        // Guest regions are mapped by the emulator owner, not by handlers.
-        Ok(())
+    fn map_anon(&mut self, base: u64, len: usize, prot: u32) -> Result<(), GuestMemError> {
+        if len == 0 {
+            return Ok(());
+        }
+        let uc_prot = linux_prot_to_uc(prot);
+        match self.uc.mem_map(base, len as u64, uc_prot) {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                // Already mapped: treat as success so brk can extend in place.
+                let _ = self.uc.mem_protect(base, len as u64, uc_prot);
+                Ok(())
+            }
+        }
     }
+
+    fn unmap(&mut self, base: u64, len: usize) -> Result<(), GuestMemError> {
+        if len == 0 {
+            return Ok(());
+        }
+        self.uc
+            .mem_unmap(base, len as u64)
+            .map_err(|e| map_uc_error(e, base, len))
+    }
+
+    fn protect(&mut self, base: u64, len: usize, prot: u32) -> Result<(), GuestMemError> {
+        if len == 0 {
+            return Ok(());
+        }
+        self.uc
+            .mem_protect(base, len as u64, linux_prot_to_uc(prot))
+            .map_err(|e| map_uc_error(e, base, len))
+    }
+
+    fn set_fs_base(&mut self, base: u64) -> Result<(), GuestMemError> {
+        self.uc
+            .reg_write(unicorn_engine::unicorn_const::RegisterX86::FS_BASE, base)
+            .map_err(|e| map_uc_error(e, base, 8))
+    }
+}
+
+fn linux_prot_to_uc(prot: u32) -> unicorn_engine::unicorn_const::Prot {
+    use unicorn_engine::unicorn_const::Prot;
+    let mut p = Prot::NONE;
+    if prot & 1 != 0 {
+        p |= Prot::READ;
+    }
+    if prot & 2 != 0 {
+        p |= Prot::WRITE;
+    }
+    if prot & 4 != 0 {
+        p |= Prot::EXEC;
+    }
+    if p == Prot::NONE {
+        p = Prot::READ;
+    }
+    p
 }
 
 #[cfg(test)]
@@ -196,10 +267,10 @@ mod tests {
     }
 
     #[test]
-    fn double_map_rejected() {
+    fn double_map_is_idempotent() {
         let mut mem = InMemGuest::new();
         mem.map_anon(0x1000, 16, 3).unwrap();
-        assert!(mem.map_anon(0x1000, 16, 3).is_err());
+        assert!(mem.map_anon(0x1000, 16, 3).is_ok());
     }
 
     #[test]

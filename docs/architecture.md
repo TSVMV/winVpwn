@@ -1,8 +1,8 @@
 # Architecture
 
-winVpwn follows a five-layer design. Stage 1 implements the minimal subset
-needed to load and run a static `ET_EXEC` x86_64 ELF that only uses `write`,
-`exit`, and `exit_group`.
+winVpwn follows a five-layer design. 0.2 implements a virtual kernel on top of
+the Stage 1 execution loop: static `ET_EXEC` x86_64 ELF images with stdio,
+explicit VFS maps, and brk/mmap.
 
 ## Layer overview
 
@@ -11,7 +11,7 @@ graph TD
     A["Python CLI (typer/rich)"] --> B["PyO3 bindings (run_elf/parse_elf)"]
     B --> C["cpu (Vcpu over Unicorn x86-64)"]
     C --> D["syscall dispatch"]
-    D --> E["vkernel (process context, guest mem, output capture)"]
+    D --> E["vkernel (FD table, VFS, brk, output)"]
     C --> F["elf loader (goblin)"]
     C --> G["trace recorder"]
 ```
@@ -21,7 +21,7 @@ graph TD
 `elf::loader::load_elf` parses the image with goblin and validates it:
 
 - magic bytes, 64-bit little-endian, `EM_X86_64`
-- `ET_EXEC` only in stage 1 (`ET_DYN`/PIE returns error `E004`)
+- `ET_EXEC` only (`ET_DYN`/PIE returns error `E004`)
 - every `PT_LOAD` segment is within the file; segments must not overlap
 
 It produces `LoadedElf` with the entry point and a list of `Segment`s.
@@ -31,32 +31,37 @@ It produces `LoadedElf` with the entry point and a list of `Segment`s.
 `cpu::unicorn_engine::Vcpu` owns a Unicorn engine and:
 
 - maps the loaded segments with their page permissions
-- maps a guest stack and installs a Linux-style argv/envp layout
+- maps a guest stack and installs a Linux argv/envp/auxv layout
 - installs an `add_insn_sys_hook` for the `syscall` instruction
+- keeps `KernelState` across syscalls (FDs, VFS, stdin, brk)
 - runs until exit, an unmapped page fetch (falloff), or a timeout
 
-The hook reads the syscall ABI registers, builds a `SyscallRegs`, dispatches,
-and writes the result back to `rax`.
+The hook reads the syscall ABI registers, builds a `SyscallRegs`, dispatches
+against the persistent kernel, and writes the result back to `rax`.
 
 ### 3. `syscall` — translation
 
-`syscall::Dispatch` routes Linux x86_64 syscall numbers to handlers. Stage 1:
+`syscall::Dispatch` routes Linux x86_64 syscall numbers to handlers.
 
-| nr | name        | behavior                                            |
-| -- | ----------- | --------------------------------------------------- |
-| 1  | `write`     | capture to the virtual process output buffer        |
-| 60 | `exit`      | set exit code and stop emulation                    |
-| 231| `exit_group`| same as `exit` for stage 1 (single thread)          |
-| *  | (unhandled) | returns `-ENOSYS` and is recorded in the trace      |
+I/O: `read`, `write`, `open`/`openat`, `close`, `lseek`, `stat`/`fstat`/`lstat`/`newfstatat`,
+`pread64`/`pwrite64`, `readv`/`writev`, `dup`/`dup2`/`fcntl`.
 
-`write` never touches a host descriptor: bytes are appended to an in-memory
-`OutputCapture` owned by the virtual process.
+Memory: `brk`, `mmap`, `mprotect`, `munmap`.
+
+Process: `exit`/`exit_group`, `getpid`/`gettid`/`getuid`/`getgid`, `arch_prctl`,
+`uname`, `getcwd`/`chdir`, `clock_gettime`/`gettimeofday`/`time`/`getrandom`.
+
+Unknown numbers return `-ENOSYS` and are recorded in the trace.
+
+`write` to fd 1/2 appends to an in-memory `OutputCapture`. Writes to a VFS file
+stay in the VFS; host files are updated only for `--map …:rw` after the guest
+exits.
 
 ### 4. `vkernel` — virtual process
 
-`vkernel::Context` is the per-syscall view: process state, a `GuestMemory`
-backend (in-memory for tests, Unicorn-backed during execution), and the
-captured output.
+`KernelState` is the per-process view: FD table, VFS, stdin buffer, cwd, brk,
+uid/gid, and captured output. `GuestMemory` is either in-memory (tests) or
+Unicorn-backed (execution). Handlers talk only to this abstraction.
 
 ### 5. `memory` — address space bookkeeping
 
@@ -66,10 +71,11 @@ It is pure guest-space bookkeeping; it grants no host access.
 ## Python side
 
 - `winvpwn.cli` — Typer CLI: `doctor`, `run`, `elf`, `asm`, `disasm`, `version`
-- `winvpwn.ui` — rich helpers (low-saturation theme, rounded tables, static
-  progress with no rotating glyphs)
+- `winvpwn.ui` — rich helpers (low-saturation theme, rounded tables)
 - `winvpwn.toolchain` — capstone/keystone wrappers for `asm`/`disasm`
-- `winvpwn_core` — the PyO3 extension exposing `run_elf` and `parse_elf`
+- `winvpwn_core` — PyO3 extension exposing `run_elf` and `parse_elf`
+
+`run_elf` accepts `stdin`, `argv`, `env`, `maps` (`guest, host, writable`), and `cwd`.
 
 ## Error codes
 
@@ -80,7 +86,7 @@ Errors carry stable machine-readable codes used by the CLI and audit logs:
 | E001 | not an ELF (bad magic)                        |
 | E002 | unsupported image format (e.g. 32-bit)        |
 | E003 | unsupported machine                           |
-| E004 | unsupported ELF type (e.g. PIE in stage 1)    |
+| E004 | unsupported ELF type (e.g. PIE)               |
 | E005 | malformed program header                      |
 | E006 | truncated image                               |
 | E007 | overlapping loadable segments                 |

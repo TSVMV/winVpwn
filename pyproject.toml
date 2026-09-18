@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "winvpwn"
-version = "0.1.0"
+version = "0.2.0"
 description = "Run Linux ELF binaries on Windows without WSL, VMs or Docker: a pwntools compatibility layer."
 readme = "README.md"
 license = { text = "MIT" }

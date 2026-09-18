@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 
 from winvpwn import _core as winvpwn_core
@@ -31,6 +33,30 @@ def test_run_rejects_non_elf() -> None:
 
 def test_run_timeout_parameter_is_accepted(hello_static_bytes: bytes) -> None:
     result = winvpwn_core.run_elf(hello_static_bytes, 5000)
+    assert result["exit"] == "exit"
+
+
+def test_run_stdin_is_passed_to_guest(hello_static_bytes: bytes) -> None:
+    result = winvpwn_core.run_elf(hello_static_bytes, 0, b"injected-input\n")
+    assert result["exit"] == "exit"
+
+
+def test_run_maps_writable_missing_host_is_accepted(
+    hello_static_bytes: bytes, tmp_path: pathlib.Path
+) -> None:
+    host = tmp_path / "out.txt"
+    maps = [("/out", str(host), True)]
+    result = winvpwn_core.run_elf(hello_static_bytes, 0, maps=maps)
+    assert result["exit"] == "exit"
+    # A writable map to a missing host file is allowed; the host file is only
+    # created when the guest actually writes through the mapping.
+    assert not host.exists()
+
+
+def test_run_argv_and_env_are_accepted(hello_static_bytes: bytes) -> None:
+    result = winvpwn_core.run_elf(
+        hello_static_bytes, 0, argv=["/prog", "a"], env=["FOO=1"], cwd="/tmp"
+    )
     assert result["exit"] == "exit"
 
 

@@ -3,6 +3,7 @@
 //! Exposes `run_elf` (load, map and execute an ELF image) and `parse_elf`
 //! (inspect a loadable image without executing it).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use pyo3::exceptions::PyValueError;
@@ -14,30 +15,98 @@ use crate::elf::load_elf;
 use crate::syscall::dispatch::Dispatch;
 use crate::syscall::dispatch_impl;
 use crate::trace::recorder::TraceSink;
+use crate::vkernel::kernel::KernelState;
 use crate::vkernel::ExitReason;
+
+/// One explicit guest-to-host file map.
+#[derive(Clone)]
+struct FileMap {
+    guest: String,
+    host: PathBuf,
+    writable: bool,
+}
 
 /// Load, map and execute an ELF image.
 ///
 /// Returns a dict with keys: `exit` (str), `code` (int, exit-only), `rip`
 /// (int, falloff-only), `output` (bytes), `trace` (list of dicts).
 #[pyfunction]
-#[pyo3(signature = (image, timeout_ms=0))]
-fn run_elf<'py>(py: Python<'py>, image: &[u8], timeout_ms: u64) -> PyResult<Bound<'py, PyDict>> {
+#[pyo3(signature = (image, timeout_ms=0, stdin=None, argv=None, env=None, maps=None, cwd=None))]
+#[allow(clippy::too_many_arguments)]
+fn run_elf<'py>(
+    py: Python<'py>,
+    image: &[u8],
+    timeout_ms: u64,
+    stdin: Option<&[u8]>,
+    argv: Option<Vec<String>>,
+    env: Option<Vec<String>>,
+    maps: Option<Vec<(String, String, bool)>>,
+    cwd: Option<String>,
+) -> PyResult<Bound<'py, PyDict>> {
     let elf = load_elf(image).map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    let mut kernel = KernelState::new();
+    if let Some(bytes) = stdin {
+        kernel.stdin = bytes.to_vec();
+    }
+    if let Some(c) = cwd {
+        kernel.cwd = if c.starts_with('/') {
+            c
+        } else {
+            format!("/{c}")
+        };
+    }
+    let argv = argv.unwrap_or_else(|| vec!["/guest".into()]);
+    kernel.exec_path = argv.first().cloned().unwrap_or_else(|| "/guest".into());
+    let envp = env.unwrap_or_default();
+
+    let parsed_maps: Vec<FileMap> = maps
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(guest, host, writable)| FileMap {
+            guest,
+            host: PathBuf::from(host),
+            writable,
+        })
+        .collect();
+
+    for m in &parsed_maps {
+        let data = match std::fs::read(&m.host) {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && m.writable => Vec::new(),
+            Err(e) => {
+                return Err(PyValueError::new_err(format!(
+                    "cannot read mapped file {}: {e}",
+                    m.host.display()
+                )));
+            }
+        };
+        kernel
+            .vfs
+            .map_file(&m.guest, data, m.writable, Some(m.host.clone()))
+            .map_err(|n| PyValueError::new_err(format!("cannot map {}: errno {n}", m.guest)))?;
+    }
 
     let trace = TraceSink::new();
     let mut dispatch = Dispatch::new();
     dispatch_impl::register_all(&mut dispatch);
     dispatch.set_trace(trace.clone());
 
-    let mut vcpu = Vcpu::new(Arc::new(dispatch)).map_err(to_err)?;
+    let mut vcpu = Vcpu::new_with_kernel(Arc::new(dispatch), kernel).map_err(to_err)?;
     vcpu.map_elf(&elf).map_err(to_err)?;
     vcpu.map_stack(STACK_BASE, STACK_SIZE).map_err(to_err)?;
-    vcpu.setup_initial_state(elf.entry, STACK_BASE + STACK_SIZE)
+    vcpu.setup_linux_stack(elf.entry, STACK_BASE + STACK_SIZE, &argv, &envp)
         .map_err(to_err)?;
 
     let reason = vcpu.run(timeout_ms).map_err(to_err)?;
     let output = vcpu.output();
+    let kernel = vcpu.kernel();
+
+    for (host, data) in kernel.vfs.dirty_host_files() {
+        std::fs::write(&host, data).map_err(|e| {
+            PyValueError::new_err(format!("cannot write mapped file {}: {e}", host.display()))
+        })?;
+    }
 
     let out = PyDict::new(py);
     match reason {

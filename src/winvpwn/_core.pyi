@@ -3,7 +3,10 @@ from __future__ import annotations
 
 from typing import Any
 
-# run_elf(image: bytes, timeout_ms: int = 0) -> dict:
+# run_elf(image: bytes, timeout_ms: int = 0, stdin: bytes | None = None,
+#         argv: list[str] | None = None, env: list[str] | None = None,
+#         maps: list[tuple[str, str, bool]] | None = None,
+#         cwd: str | None = None) -> dict:
 #   {
 #     "exit": str,                      # "exit" | "falloff" | "stopped"
 #     "code": int,                      # present when exit == "exit"
@@ -11,7 +14,15 @@ from typing import Any
 #     "output": bytes,
 #     "trace": list[dict[str, Any]],    # {seq, nr, name, args, ret, rip}
 #   }
-def run_elf(image: bytes, timeout_ms: int = 0) -> dict[str, Any]: ...
+def run_elf(
+    image: bytes,
+    timeout_ms: int = 0,
+    stdin: bytes | None = None,
+    argv: list[str] | None = None,
+    env: list[str] | None = None,
+    maps: list[tuple[str, str, bool]] | None = None,
+    cwd: str | None = None,
+) -> dict[str, Any]: ...
 
 # parse_elf(image: bytes) -> dict:
 #   {

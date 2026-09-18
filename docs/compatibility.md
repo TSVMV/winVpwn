@@ -1,31 +1,33 @@
 # Compatibility
 
-## Supported images (stage 1)
+## Supported images (0.2)
 
 - Static `ET_EXEC` x86_64 (little-endian) ELF images.
-- `PT_LOAD` segments with the full `.text`/`.data`/`.bss` range required by a
-  hello-world static binary.
+- `PT_LOAD` segments covering `.text` / `.data` / `.bss`.
+- Programs that use stdin, mapped files, `brk`, and anonymous `mmap`.
+- Static musl/glibc bootstrap syscalls (`arch_prctl`, `uname`, `set_tid_address`, …).
 
 ## Not supported yet
 
 - PIE (`ET_DYN`) and shared libraries.
 - 32-bit (`EM_386`) images.
-- Dynamic linking, threads, signals.
-- Any syscall beyond `write`, `exit`, `exit_group` (returns `-ENOSYS`).
-- mmap/mprotect requested by the guest at runtime.
+- Dynamic linking, threads, signals as real delivery.
+- Guest networking.
+- Runtime `mmap` of host files except through an already-open VFS fd.
 
 ## Execution model
 
-- The guest stack is placed at `0x7ffffffde000` with a minimal
-  `argc=0, argv=[NULL], envp=[NULL]` layout (no arguments or environment in
-  stage 1).
-- Output written to fds 1/2 is captured in-memory; nothing touches the host
-  filesystem or network.
+- The guest stack is placed at `0x7ffffffde000` with a Linux argv/envp/auxv
+  layout (`AT_PAGESZ`, `AT_ENTRY`, `AT_UID`/`AT_EUID`/`AT_GID`/`AT_EGID`,
+  `AT_RANDOM`). Default argv is the ELF path.
+- Fd 0 reads the `--stdin` buffer. Fd 1/2 are captured in-memory.
+- Host files appear in the VFS only when passed as `--map guest=host` or
+  `--map guest=host:rw`. Unmapped paths return `-ENOENT`.
+- Guest `O_CREAT` creates an in-memory node that is never flushed to the host.
 - Emulation stops when the process calls `exit`/`exit_group`, when the guest
   fetches from an unmapped page, or after the timeout.
 
 ## Host support
 
 The core engine and CLI are host-agnostic (the emulator runs on Windows too).
-Windows toolchain support for the `winvpwn asm`/`disasm` helpers ships in a
-later stage.
+`--map` paths are host-native; guest paths are always Linux-style (`/flag`).

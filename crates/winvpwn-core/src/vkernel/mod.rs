@@ -1,11 +1,15 @@
-//! The virtual kernel layer: processes and the per-process context handed to
-//! syscall handlers.
+//! The virtual kernel layer: processes, file descriptors, VFS, and the
+//! per-syscall context handed to handlers.
 
+pub mod fd;
 pub mod io;
+pub mod kernel;
 pub mod mem;
 pub mod process;
+pub mod vfs;
 
 use crate::memory::mmap::{MemoryMap, MmapError};
+use crate::vkernel::kernel::KernelState;
 use crate::vkernel::mem::GuestMemory;
 use crate::vkernel::process::ProcessState;
 
@@ -84,21 +88,19 @@ impl Default for Process {
     }
 }
 
-/// The context shared by the syscall dispatcher: process state, guest memory
-/// access, and captured output.
+/// The context shared by the syscall dispatcher: guest memory plus kernel
+/// state that survives across syscalls (FDs, VFS, brk, stdin).
 pub struct Context<'a> {
-    pub process: ProcessState,
     pub mem: Box<dyn GuestMemory + 'a>,
-    pub io: crate::vkernel::io::OutputCapture,
+    pub kernel: KernelState,
 }
 
 impl Context<'_> {
     /// Create an empty context backed by an in-memory guest map.
     pub fn new() -> Self {
         Self {
-            process: ProcessState::Running,
             mem: Box::new(crate::vkernel::mem::InMemGuest::new()),
-            io: crate::vkernel::io::OutputCapture::default(),
+            kernel: KernelState::new(),
         }
     }
 }
