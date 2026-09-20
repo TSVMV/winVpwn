@@ -28,6 +28,8 @@ pub mod linux {
     pub const EISDIR: i64 = 21;
     /// `EINVAL` — invalid argument.
     pub const EINVAL: i64 = 22;
+    /// `EFBIG` — file too large.
+    pub const EFBIG: i64 = 27;
     /// `ENFILE` — file table overflow.
     pub const ENFILE: i64 = 23;
     /// `EMFILE` — too many open files.

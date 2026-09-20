@@ -6,11 +6,16 @@
 
 use std::fmt;
 
-use goblin::elf::header::{EM_X86_64, ET_DYN, ET_EXEC};
+use goblin::elf::header::{EM_X86_64, ET_EXEC};
 use goblin::elf::program_header::{PF_R, PF_W, PF_X, PT_LOAD};
 use goblin::elf::Elf;
 
 use crate::memory::mmap::MemoryMap;
+
+/// Upper bound for a single `PT_LOAD` segment's in-memory size, so a crafted
+/// header cannot force a host allocation proportional to guest-controlled
+/// `p_memsz`.
+pub const MAX_SEGMENT_MEMSZ: u64 = 1 << 32;
 
 /// A single loadable `PT_LOAD` segment.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,13 +139,7 @@ pub fn load_elf(image: &[u8]) -> Result<LoadedElf, ElfError> {
         return Err(ElfError::UnsupportedMachine);
     }
 
-    let is_pie = elf.header.e_type == ET_DYN;
     if elf.header.e_type != ET_EXEC {
-        if is_pie {
-            return Err(ElfError::UnsupportedType {
-                found: elf.header.e_type,
-            });
-        }
         return Err(ElfError::UnsupportedType {
             found: elf.header.e_type,
         });
@@ -182,6 +181,15 @@ pub fn load_elf(image: &[u8]) -> Result<LoadedElf, ElfError> {
             )));
         }
 
+        if phdr.p_filesz > phdr.p_memsz {
+            return Err(ElfError::BadPhdr(
+                "PT_LOAD filesz exceeds memsz".into(),
+            ));
+        }
+        if phdr.p_memsz > MAX_SEGMENT_MEMSZ {
+            return Err(ElfError::BadPhdr("PT_LOAD memsz exceeds limit".into()));
+        }
+
         let mut data = vec![0u8; phdr.p_memsz as usize];
         let file = &image[phdr.p_offset as usize..file_end as usize];
         data[..file.len()].copy_from_slice(file);
@@ -203,7 +211,7 @@ pub fn load_elf(image: &[u8]) -> Result<LoadedElf, ElfError> {
     Ok(LoadedElf {
         entry: elf.entry,
         segments,
-        is_pie,
+        is_pie: false,
     })
 }
 
@@ -219,6 +227,7 @@ pub fn perms_string(flags: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use goblin::elf::header::ET_DYN;
 
     const HELLO: &[u8] = include_bytes!("../../tests/fixtures/hello_static");
 
