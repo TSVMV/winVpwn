@@ -437,6 +437,9 @@ handler!(PrlimitHandler, nr::PRLIMIT64, "prlimit64", |ctx: &mut Context<'_>, _re
 
 handler!(GetrandomHandler, nr::GETRANDOM, "getrandom", |ctx: &mut Context<'_>, regs: SyscallRegs| {
     let n = regs.arg1 as usize;
+    if n > crate::vkernel::mem::MAX_IO_TRANSFER {
+        return e(linux::EINVAL);
+    }
     let mut buf = vec![0u8; n];
     let mut i = 0;
     while i < n {
@@ -578,7 +581,7 @@ fn do_read(
             if start >= ctx.kernel.stdin.len() {
                 return ret(0);
             }
-            let end = (start + count).min(ctx.kernel.stdin.len());
+            let end = start.saturating_add(count).min(ctx.kernel.stdin.len());
             let slice = ctx.kernel.stdin[start..end].to_vec();
             if ctx.mem.write(ptr, &slice).is_err() {
                 return Ok(fault());
@@ -603,7 +606,7 @@ fn do_read(
             if start_u >= file.data.len() {
                 return ret(0);
             }
-            let end = (start_u + count).min(file.data.len());
+            let end = start_u.saturating_add(count).min(file.data.len());
             let slice = file.data[start_u..end].to_vec();
             if ctx.mem.write(ptr, &slice).is_err() {
                 return Ok(fault());
@@ -689,12 +692,16 @@ fn do_write(
             } else {
                 at.unwrap_or(cursor) as usize
             };
-            if pos + data.len() > file.data.len() {
-                file.data.resize(pos + data.len(), 0);
+            let end = match pos.checked_add(data.len()) {
+                Some(end) => end,
+                None => return e(linux::EFBIG),
+            };
+            if end > file.data.len() {
+                file.data.resize(end, 0);
             }
-            file.data[pos..pos + data.len()].copy_from_slice(&data);
+            file.data[pos..end].copy_from_slice(&data);
             file.dirty = true;
-            let new_cur = (pos + data.len()) as u64;
+            let new_cur = end as u64;
             if at.is_none() {
                 if let Some(Fd {
                     kind: FdKind::File { cursor, .. },
@@ -855,6 +862,9 @@ fn do_mmap(
     if length == 0 {
         return e(linux::EINVAL);
     }
+    if length > crate::vkernel::mem::MAX_MAP_SIZE {
+        return e(linux::ENOMEM);
+    }
     let len = page_up(length);
     let anonymous = flags & MAP_ANONYMOUS != 0;
     let fixed = flags & MAP_FIXED != 0;
@@ -969,6 +979,9 @@ fn do_readv(
     if iovcnt <= 0 {
         return e(linux::EINVAL);
     }
+    if iovcnt > 4096 {
+        return e(linux::EINVAL);
+    }
     let mut total = 0i64;
     for i in 0..iovcnt as u64 {
         let base = match ctx.mem.read(iov + i * 16, 8) {
@@ -999,6 +1012,9 @@ fn do_writev(
     iovcnt: i64,
 ) -> Result<SyscallOutcome, DispatchError> {
     if iovcnt <= 0 {
+        return e(linux::EINVAL);
+    }
+    if iovcnt > 4096 {
         return e(linux::EINVAL);
     }
     let mut total = 0i64;

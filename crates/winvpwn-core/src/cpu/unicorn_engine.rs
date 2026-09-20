@@ -376,17 +376,31 @@ impl Vcpu {
     /// `timeout_ms` of 0 means no time limit. Returns the [`ExitReason`].
     pub fn run(&mut self, timeout_ms: u64) -> VcpuResult<ExitReason> {
         let uc = self.uc.as_mut().expect("engine present");
+        // Clear stale state from a previous run so a repeated `run` does not
+        // report the earlier exit reason or engine error.
+        {
+            let mut state = self.shared.borrow_mut();
+            state.exit_reason = None;
+            state.engine_error = None;
+        }
         let start = uc.reg_read(RegisterX86::RIP).unwrap_or(0);
         // `until` is an exclusive stop address; `u64::MAX` means "no bound", so
         // the guest only stops on a syscall-driven `emu_stop`, an unmapped
-        // access, or the timeout.
-        let err = uc.emu_start(start, u64::MAX, timeout_ms, 0);
+        // access, or the timeout. Unicorn measures the timeout in microseconds.
+        let timeout_us = if timeout_ms == 0 {
+            0
+        } else {
+            timeout_ms.saturating_mul(1000)
+        };
+        let err = uc.emu_start(start, u64::MAX, timeout_us, 0);
         if let Err(e) = err {
-            // The guest tried to read/fetch from an unmapped page: that is the
-            // normal "fell off the image" path.
+            // The guest tried to read/fetch/write from an unmapped or
+            // non-readable/non-executable page: that is the normal "fell off
+            // the image" path.
             let msg = e.to_string();
-            if msg.contains("READ_PROTECT")
-                || msg.contains("FETCH_PROTECT")
+            if msg.contains("READ_PROT")
+                || msg.contains("FETCH_PROT")
+                || msg.contains("WRITE_PROT")
                 || msg.contains("READ_UNMAPPED")
                 || msg.contains("FETCH_UNMAPPED")
                 || msg.contains("WRITE_UNMAPPED")

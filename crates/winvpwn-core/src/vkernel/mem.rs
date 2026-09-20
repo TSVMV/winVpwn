@@ -31,6 +31,13 @@ impl std::fmt::Display for GuestMemError {
 
 impl std::error::Error for GuestMemError {}
 
+/// Upper bound for a single guest transfer (read/write). Larger requests are
+/// rejected before any allocation so a malicious guest cannot OOM the host.
+pub const MAX_IO_TRANSFER: usize = 64 * 1024 * 1024;
+
+/// Upper bound for a single anonymous mapping size.
+pub const MAX_MAP_SIZE: u64 = 4 * 1024 * 1024 * 1024;
+
 /// The guest-memory interface used by syscall handlers.
 pub trait GuestMemory {
     /// Read `len` bytes from `addr`.
@@ -88,6 +95,9 @@ impl InMemGuest {
 
 impl GuestMemory for InMemGuest {
     fn map_anon(&mut self, base: u64, len: usize, _prot: u32) -> Result<(), GuestMemError> {
+        if len as u64 > MAX_MAP_SIZE {
+            return Err(GuestMemError { addr: base, len });
+        }
         if self.bytes.contains_key(&base) {
             return Ok(());
         }
@@ -96,6 +106,9 @@ impl GuestMemory for InMemGuest {
     }
 
     fn read(&self, addr: u64, len: usize) -> Result<Vec<u8>, GuestMemError> {
+        if len > MAX_IO_TRANSFER {
+            return Err(GuestMemError { addr, len });
+        }
         let mut out = Vec::with_capacity(len);
         let mut cursor = addr;
         while out.len() < len {
@@ -120,6 +133,12 @@ impl GuestMemory for InMemGuest {
     }
 
     fn write(&mut self, addr: u64, data: &[u8]) -> Result<(), GuestMemError> {
+        if data.len() > MAX_IO_TRANSFER {
+            return Err(GuestMemError {
+                addr,
+                len: data.len(),
+            });
+        }
         let mut cursor = addr;
         let mut idx = 0usize;
         while idx < data.len() {
@@ -175,6 +194,9 @@ fn map_uc_error(e: uc_error, addr: u64, len: usize) -> GuestMemError {
 
 impl GuestMemory for UnicornGuest<'_, '_> {
     fn read(&self, addr: u64, len: usize) -> Result<Vec<u8>, GuestMemError> {
+        if len > MAX_IO_TRANSFER {
+            return Err(GuestMemError { addr, len });
+        }
         let mut buf = vec![0u8; len];
         self.uc
             .mem_read(addr, &mut buf)
@@ -183,6 +205,12 @@ impl GuestMemory for UnicornGuest<'_, '_> {
     }
 
     fn write(&mut self, addr: u64, data: &[u8]) -> Result<(), GuestMemError> {
+        if data.len() > MAX_IO_TRANSFER {
+            return Err(GuestMemError {
+                addr,
+                len: data.len(),
+            });
+        }
         self.uc
             .mem_write(addr, data)
             .map_err(|e| map_uc_error(e, addr, data.len()))
@@ -192,13 +220,18 @@ impl GuestMemory for UnicornGuest<'_, '_> {
         if len == 0 {
             return Ok(());
         }
+        if len as u64 > MAX_MAP_SIZE {
+            return Err(GuestMemError { addr: base, len });
+        }
         let uc_prot = linux_prot_to_uc(prot);
         match self.uc.mem_map(base, len as u64, uc_prot) {
             Ok(()) => Ok(()),
             Err(_) => {
-                // Already mapped: treat as success so brk can extend in place.
-                let _ = self.uc.mem_protect(base, len as u64, uc_prot);
-                Ok(())
+                // Already mapped (e.g. brk extends in place): update protections.
+                // Otherwise surface the failure instead of reporting success.
+                self.uc
+                    .mem_protect(base, len as u64, uc_prot)
+                    .map_err(|e| map_uc_error(e, base, len))
             }
         }
     }

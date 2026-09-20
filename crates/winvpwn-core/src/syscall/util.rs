@@ -42,7 +42,7 @@ pub fn page_down(addr: u64) -> u64 {
 
 /// Round `addr` up to a page boundary.
 pub fn page_up(addr: u64) -> u64 {
-    (addr + 0xfff) & !0xfff
+    addr.saturating_add(0xfff) & !0xfff
 }
 
 /// Linux `struct stat` (x86_64) size.
