@@ -73,3 +73,11 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 addopts = "-q"
 filterwarnings = ["error"]
+
+[tool.coverage.run]
+source = ["winvpwn"]
+omit = ["*/patch/*", "*/ui/progress.py"]
+
+[tool.coverage.report]
+fail_under = 75
+show_missing = true

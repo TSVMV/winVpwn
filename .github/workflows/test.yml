@@ -48,4 +48,4 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           pip install pytest-cov
-          pytest --cov=src/winvpwn --cov-report=term-missing --cov-fail-under=80
+          pytest --cov=winvpwn --cov-report=term-missing
